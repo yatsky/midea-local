@@ -120,8 +120,8 @@ class MideaCCDevice(MideaDevice):
                 if status == DeviceAttributes.fan_speed:
                     fan_speed = value
                 else:
-                    self._attributes[status] = getattr(message, str(status))
-                    new_status[str(status)] = getattr(message, str(status))
+                    self._attributes[status] = value
+                    new_status[str(status)] = value
         if (
             fan_speed is not None
             and self._attributes[DeviceAttributes.fan_speed_level] is not None
@@ -131,6 +131,19 @@ class MideaCCDevice(MideaDevice):
                     self._fan_speeds = MideaCCDevice._fan_speeds_3level
                 else:
                     self._fan_speeds = MideaCCDevice._fan_speeds_7level
+            if fan_speed in self._fan_speeds:
+                self._attributes[DeviceAttributes.fan_speed] = self._fan_speeds.get(
+                    fan_speed,
+                )
+            else:
+                self._attributes[DeviceAttributes.fan_speed] = None
+            new_status[DeviceAttributes.fan_speed.value] = self._attributes[
+                DeviceAttributes.fan_speed
+            ]
+        elif fan_speed is not None and self._fan_speeds is None:
+            # VNT8 devices: fan_speed_level may be 0 but we still have a fan_speed value
+            # Initialize with 7-level speeds as default for VNT8
+            self._fan_speeds = MideaCCDevice._fan_speeds_7level
             if fan_speed in self._fan_speeds:
                 self._attributes[DeviceAttributes.fan_speed] = self._fan_speeds.get(
                     fan_speed,

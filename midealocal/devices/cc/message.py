@@ -1,5 +1,6 @@
 """Midea local CC message."""
 
+import struct
 from enum import IntEnum
 
 from midealocal.const import DeviceType
@@ -10,6 +11,28 @@ from midealocal.message import (
     MessageResponse,
     MessageType,
 )
+
+
+class CCControlId(IntEnum):
+    """VNT8 CC device control IDs (TLV protocol)."""
+
+    POWER = 0x0000
+    TARGET_TEMPERATURE = 0x0003
+    TEMPERATURE_UNIT = 0x000C
+    TARGET_HUMIDITY = 0x000F
+    MODE = 0x0012
+    FAN_SPEED = 0x0015
+    VERT_SWING_ANGLE = 0x001C
+    HORZ_SWING_ANGLE = 0x001E
+    WIND_SENSE = 0x0020
+    ECO = 0x0028
+    SILENT = 0x002A
+    SLEEP = 0x002C
+    SELF_CLEAN = 0x002E
+    PURIFIER = 0x003A
+    BEEP = 0x003F
+    DISPLAY = 0x0040
+    AUX_MODE = 0x0043
 
 
 class CCHeatStatus(IntEnum):
@@ -137,7 +160,7 @@ class MessageSet(MessageCCBase):
 
 
 class CCGeneralMessageBody(MessageBody):
-    """CC message general body."""
+    """CC message general body (old fixed-offset protocol)."""
 
     def __init__(self, body: bytearray) -> None:
         """Initialize CC message general body."""
@@ -163,6 +186,61 @@ class CCGeneralMessageBody(MessageBody):
         self.temp_fahrenheit = (body[20] & 0x80) > 0
 
 
+class CCTLVMessageBody(MessageBody):
+    """VNT8 CC message body decoded from TLV (Type-Length-Value) protocol.
+
+    This handles the newer VNT8 protocol used by MDV multi-split CC devices,
+    where the response uses a 0x01 0xFE header followed by structured data
+    with ControlId-keyed fields at known byte offsets.
+    """
+
+    def __init__(self, body: bytearray) -> None:
+        """Parse VNT8 TLV query response body."""
+        super().__init__(body)
+        # The 0x01 0xFE header is already stripped by the caller
+        # body[0:8] = header section
+        # body[8:]  = data section
+
+        self.power = body[8] > 0
+        # target_temperature: encoded as (data / 2) - 40
+        self.target_temperature = (body[11] / 2.0) - 40
+        # indoor_temperature: 2-byte big-endian, value / 10
+        self.indoor_temperature = ((body[12] << 8) | body[13]) / 10.0
+        # outdoor_temperature: same encoding as target if non-zero
+        outdoor_raw = body[14]
+        if outdoor_raw:
+            self.outdoor_temperature = (outdoor_raw / 2.0) - 40
+        else:
+            self.outdoor_temperature = None
+
+        self.mode = 0
+        mode_raw = body[31]
+        mode_map = {1: 1, 2: 2, 3: 3, 5: 1, 6: 4}
+        self.mode = mode_map.get(mode_raw, 1)
+        # Default values for attributes not in TLV response
+        self.fan_speed = body[34] if len(body) > 34 else 0x80
+        self.eco_mode = body[56] > 0 if len(body) > 56 else False
+        self.sleep_mode = body[60] > 0 if len(body) > 60 else False
+        self.night_light = False  # Not in VNT8 TLV
+        self.ventilation = False  # Not in VNT8 TLV
+        self.aux_heat_status = 0
+        self.auto_aux_heat_running = False
+        self.fan_speed_level = bool(body[32] if len(body) > 32 else 0)
+        self.temperature_precision = 1  # VNT8 uses 0.5C stepping
+        self.swing = False
+        self.temp_fahrenheit = body[21] > 0 if len(body) > 21 else False
+
+    def parse_capabilities(self) -> None:
+        """Parse capabilities from VNT8 TLV response (body offset index).
+
+        Called after initial parse to fill in device capability fields.
+        """
+        body = self.body
+        if len(body) >= 11:
+            self.target_temperature_min = (body[9] / 2.0) - 40 if body[9] else 17
+            self.target_temperature_max = (body[10] / 2.0) - 40 if body[10] else 30
+
+
 class MessageCCResponse(MessageResponse):
     """CC message response."""
 
@@ -177,5 +255,14 @@ class MessageCCResponse(MessageResponse):
             )
             or (self.message_type == MessageType.set and self.body_type == ListTypes.C3)
         ):
-            self.set_body(CCGeneralMessageBody(super().body))
+            raw_body = super().body
+            # Detect VNT8 TLV protocol: body starts with 0x01 0xFE
+            if len(raw_body) >= 2 and raw_body[0] == 0x01 and raw_body[1] == 0xFE:
+                message_body = CCTLVMessageBody(raw_body)
+                # Parse capabilities from same response
+                message_body.parse_capabilities()
+                self.set_body(message_body)
+            else:
+                # Old-style fixed-offset CC protocol
+                self.set_body(CCGeneralMessageBody(raw_body))
         self.set_attr()
