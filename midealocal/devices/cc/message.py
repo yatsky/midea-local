@@ -159,6 +159,74 @@ class MessageSet(MessageCCBase):
         )
 
 
+class CCTLVMessageSet(MessageCCBase):
+    """EXPERIMENTAL VNT8 CC SET frame.
+
+    Hypothesis: VNT8 accepts SETs in the same fixed-offset layout as its
+    notify/query responses, with body_type=0xC3 (mirroring legacy CC SET
+    convention). Caller seeds with the most recent notify body so
+    unmodelled bytes pass through unchanged; we only mutate fields we
+    model. If the AC ignores SETs of this form, we need a real TLV
+    encoder instead.
+
+    Byte offsets (into the full response body, body_type at position 0):
+      8  power           0x00 / 0x01
+      11 target_temp     (temp + 40) * 2
+      31 mode            raw 1..6
+      34 fan_speed       1..7 levels, 8 = auto, 0 = off
+    """
+
+    _POS_POWER = 8
+    _POS_TARGET = 11
+    _POS_MODE = 31
+    _POS_FAN = 34
+
+    def __init__(self, protocol_version: int, template: bytes) -> None:
+        """Initialize a TLV SET seeded from the last received notify body."""
+        super().__init__(
+            protocol_version=protocol_version,
+            message_type=MessageType.set,
+            body_type=ListTypes.C3,
+        )
+        self._template = bytearray(template)
+        self.power: bool | None = None
+        self.target_temperature: float | None = None
+        self.mode: int | None = None
+        self.fan_speed: int | None = None
+        # Accepted via setattr() from set_attribute(); ignored in _body.
+        self.eco_mode = False
+        self.sleep_mode = False
+        self.night_light = False
+        self.aux_heat_status = 0
+        self.swing = False
+        self.ventilation = False
+
+    @property
+    def _body(self) -> bytearray:
+        body = bytearray(self._template)
+        # Strip the response's body_type (0x01); framework prepends 0xC3.
+        if body and body[0] in (0x01, 0xC3):
+            body = body[1:]
+
+        def _put(pos: int, value: int) -> None:
+            idx = pos - 1
+            if 0 <= idx < len(body):
+                body[idx] = value & 0xFF
+
+        if self.power is not None:
+            _put(self._POS_POWER, 0x01 if self.power else 0x00)
+        if self.target_temperature is not None:
+            _put(
+                self._POS_TARGET,
+                int(round((self.target_temperature + 40) * 2)),
+            )
+        if self.mode is not None:
+            _put(self._POS_MODE, int(self.mode))
+        if self.fan_speed is not None:
+            _put(self._POS_FAN, int(self.fan_speed))
+        return body
+
+
 class CCGeneralMessageBody(MessageBody):
     """CC message general body (old fixed-offset protocol)."""
 

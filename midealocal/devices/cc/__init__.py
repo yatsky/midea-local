@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from midealocal.const import DeviceType, ProtocolVersion
 from midealocal.device import MideaDevice
 
-from .message import MessageCCResponse, MessageQuery, MessageSet
+from .message import CCTLVMessageSet, MessageCCResponse, MessageQuery, MessageSet
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +98,8 @@ class MideaCCDevice(MideaDevice):
             },
         )
         self._fan_speeds: dict[int, str] | None = None
+        # Cached last-seen TLV body, used as a template for VNT8 SET frames.
+        self._tlv_template: bytes | None = None
 
     @property
     def fan_modes(self) -> list[str] | None:
@@ -112,6 +114,9 @@ class MideaCCDevice(MideaDevice):
         """Midea CC device process message."""
         message = MessageCCResponse(msg)
         _LOGGER.debug("[%s] Received: %s", self.device_id, message)
+        body_data = bytes(message.data) if message.data is not None else b""
+        if len(body_data) >= 2 and body_data[0] == 0x01 and body_data[1] == 0xFE:
+            self._tlv_template = body_data
         new_status = {}
         fan_speed: int | None = None
         for status in self._attributes:
@@ -164,9 +169,21 @@ class MideaCCDevice(MideaDevice):
             ]
         return new_status
 
-    def make_message_set(self) -> MessageSet:
-        """Midea CC device make message set."""
-        message = MessageSet(self._message_protocol_version)
+    def make_message_set(self) -> MessageSet | CCTLVMessageSet:
+        """Midea CC device make message set.
+
+        For VNT8 devices (which speak TLV on the wire) we return an
+        experimental CCTLVMessageSet seeded with the last received notify
+        body. Legacy CC devices keep using the fixed legacy MessageSet.
+        """
+        message: MessageSet | CCTLVMessageSet
+        if self._tlv_template is not None:
+            message = CCTLVMessageSet(
+                self._message_protocol_version,
+                self._tlv_template,
+            )
+        else:
+            message = MessageSet(self._message_protocol_version)
         message.power = self._attributes[DeviceAttributes.power]
         message.mode = self._attributes[DeviceAttributes.mode]
         message.target_temperature = self._attributes[
