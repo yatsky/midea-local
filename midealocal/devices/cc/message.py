@@ -174,21 +174,42 @@ class CCTLVMessageSet(MessageCCBase):
       11 target_temp     (temp + 40) * 2
       31 mode            raw 1..6
       34 fan_speed       1..7 levels, 8 = auto, 0 = off
+      36 phase_a         0x05 when running, 0x00 when off
+      41 phase_b         0x05 when running, 0x00 when off
+      43 phase_c         0x02 when running, 0x03 when off
+
+    Phase bytes are AC-reported activity flags that we mirror into our
+    SETs so the frame "looks like" the AC's own running/off snapshot.
+    Without them the AC sees power=on with phase=off, calls it
+    incoherent, and silently drops the SET.
     """
 
     _POS_POWER = 8
     _POS_TARGET = 11
     _POS_MODE = 31
     _POS_FAN = 34
+    _POS_PHASE_A = 36
+    _POS_PHASE_B = 41
+    _POS_PHASE_C = 43
 
-    def __init__(self, protocol_version: int, template: bytes) -> None:
+    # Hardcoded ON-state snapshot (mode=3 heat, fan=7, target=28) used
+    # as a fallback when we haven't yet captured a power-on notify.
+    # Sourced from a real 171PNL01 capture.
+    _DEFAULT_TEMPLATE = bytes.fromhex(
+        "01fe00000043005001728c88008100728c728c888800010141ff"
+        "010203000603010007000500000001050102010000000000000000000001"
+        "000100010000000000000000000000000001000200000100000001000102"
+        "ff02ff",
+    )
+
+    def __init__(self, protocol_version: int, template: bytes | None = None) -> None:
         """Initialize a TLV SET seeded from the last received notify body."""
         super().__init__(
             protocol_version=protocol_version,
             message_type=MessageType.set,
             body_type=ListTypes.C3,
         )
-        self._template = bytearray(template)
+        self._template = bytearray(template if template else self._DEFAULT_TEMPLATE)
         self.power: bool | None = None
         self.target_temperature: float | None = None
         self.mode: int | None = None
@@ -215,14 +236,21 @@ class CCTLVMessageSet(MessageCCBase):
 
         if self.power is True:
             _put(self._POS_POWER, 0x01)
-            # If powering on without an explicit fan_speed, force a
-            # non-zero default. The AC beeps but ignores SETs that say
-            # "power on with fan=0" — incoherent with running state.
+            _put(self._POS_PHASE_A, 0x05)
+            _put(self._POS_PHASE_B, 0x05)
+            _put(self._POS_PHASE_C, 0x02)
+            # Fan must be a valid running level when powering on.
+            # 0x08 (auto) caused the AC to reject the SET; 0x07 (Level 7)
+            # is the value we've actually seen the AC report in notifies.
             if self.fan_speed is None and self._POS_FAN - 1 < len(body):
                 if body[self._POS_FAN - 1] == 0:
-                    _put(self._POS_FAN, 0x08)
+                    _put(self._POS_FAN, 0x07)
         elif self.power is False:
             _put(self._POS_POWER, 0x00)
+            _put(self._POS_FAN, 0x00)
+            _put(self._POS_PHASE_A, 0x00)
+            _put(self._POS_PHASE_B, 0x00)
+            _put(self._POS_PHASE_C, 0x03)
         if self.target_temperature is not None:
             _put(
                 self._POS_TARGET,
