@@ -235,7 +235,7 @@ class CCTLVMessageBody(MessageBody):
 
         Called after initial parse to fill in device capability fields.
         """
-        body = self.body
+        body = self._data
         if len(body) >= 11:
             self.target_temperature_min = (body[9] / 2.0) - 40 if body[9] else 17
             self.target_temperature_max = (body[10] / 2.0) - 40 if body[10] else 30
