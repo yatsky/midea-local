@@ -160,14 +160,21 @@ class MessageSet(MessageCCBase):
 
 
 class CCTLVMessageSet(MessageCCBase):
-    """EXPERIMENTAL VNT8 CC SET frame.
+    """EXPERIMENTAL VNT8 CC SET frame — KNOWN NOT TO WORK as of 2026-06-01.
 
-    Hypothesis: VNT8 accepts SETs in the same fixed-offset layout as its
-    notify/query responses, with body_type=0xC3 (mirroring legacy CC SET
-    convention). Caller seeds with the most recent notify body so
-    unmodelled bytes pass through unchanged; we only mutate fields we
-    model. If the AC ignores SETs of this form, we need a real TLV
-    encoder instead.
+    Status: the "mirror response body as SET" hypothesis was tested
+    across four iterations (body_type 0xC3 / 0x01, varying mutation
+    sets). The closest result was an AC ACK beep with no state change
+    in one minimal variant; everything else was silently dropped. The
+    VNT8 (171PNL01) SET protocol is genuinely different from its
+    response protocol — likely real TLV records keyed by CCControlId
+    plus some framing/integrity bits we can't reproduce without seeing
+    a real SET frame.
+
+    Kept in place as scaffolding for a future H2 (true TLV-record)
+    encoder. Receive-side parsing (CCTLVMessageBody) works fine — only
+    sending is broken. See docs/vnt8-set-experiments.md in the
+    homeassistant-lzc repo for the full experiment log and next steps.
 
     Byte offsets (into the full response body, body_type at position 0):
       8  power           0x00 / 0x01
