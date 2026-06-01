@@ -213,8 +213,16 @@ class CCTLVMessageSet(MessageCCBase):
             if 0 <= idx < len(body):
                 body[idx] = value & 0xFF
 
-        if self.power is not None:
-            _put(self._POS_POWER, 0x01 if self.power else 0x00)
+        if self.power is True:
+            _put(self._POS_POWER, 0x01)
+            # If powering on without an explicit fan_speed, force a
+            # non-zero default. The AC beeps but ignores SETs that say
+            # "power on with fan=0" — incoherent with running state.
+            if self.fan_speed is None and self._POS_FAN - 1 < len(body):
+                if body[self._POS_FAN - 1] == 0:
+                    _put(self._POS_FAN, 0x08)
+        elif self.power is False:
+            _put(self._POS_POWER, 0x00)
         if self.target_temperature is not None:
             _put(
                 self._POS_TARGET,

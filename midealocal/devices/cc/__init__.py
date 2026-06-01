@@ -98,8 +98,13 @@ class MideaCCDevice(MideaDevice):
             },
         )
         self._fan_speeds: dict[int, str] | None = None
-        # Cached last-seen TLV body, used as a template for VNT8 SET frames.
-        self._tlv_template: bytes | None = None
+        # Cached TLV bodies (last seen power-on / power-off snapshots).
+        # When sending a SET we prefer the template matching the intended
+        # power state so phase-dependent bytes (running fan, activity
+        # flags) are coherent with the SET; otherwise the AC beeps but
+        # ignores the command.
+        self._tlv_template_on: bytes | None = None
+        self._tlv_template_off: bytes | None = None
 
     @property
     def fan_modes(self) -> list[str] | None:
@@ -114,9 +119,19 @@ class MideaCCDevice(MideaDevice):
         """Midea CC device process message."""
         message = MessageCCResponse(msg)
         _LOGGER.debug("[%s] Received: %s", self.device_id, message)
-        body_data = bytes(message.data) if message.data is not None else b""
-        if len(body_data) >= 2 and body_data[0] == 0x01 and body_data[1] == 0xFE:
-            self._tlv_template = body_data
+        # Cache TLV body snapshots. msg layout: 10-byte header, body,
+        # 1-byte checksum.
+        if len(msg) > 11:
+            raw_body = bytes(msg[10:-1])
+            if (
+                len(raw_body) >= 9
+                and raw_body[0] == 0x01
+                and raw_body[1] == 0xFE
+            ):
+                if raw_body[8]:
+                    self._tlv_template_on = raw_body
+                else:
+                    self._tlv_template_off = raw_body
         new_status = {}
         fan_speed: int | None = None
         for status in self._attributes:
@@ -173,15 +188,17 @@ class MideaCCDevice(MideaDevice):
         """Midea CC device make message set.
 
         For VNT8 devices (which speak TLV on the wire) we return an
-        experimental CCTLVMessageSet seeded with the last received notify
-        body. Legacy CC devices keep using the fixed legacy MessageSet.
+        experimental CCTLVMessageSet seeded from a cached notify body.
+        We prefer the power-on template since most SETs are "do
+        something while running" — if the AC is currently off we still
+        want phase bytes (running fan, activity flags) to look like an
+        ON state so the AC actually transitions. Legacy CC devices keep
+        using the fixed legacy MessageSet.
         """
         message: MessageSet | CCTLVMessageSet
-        if self._tlv_template is not None:
-            message = CCTLVMessageSet(
-                self._message_protocol_version,
-                self._tlv_template,
-            )
+        template = self._tlv_template_on or self._tlv_template_off
+        if template is not None:
+            message = CCTLVMessageSet(self._message_protocol_version, template)
         else:
             message = MessageSet(self._message_protocol_version)
         message.power = self._attributes[DeviceAttributes.power]
