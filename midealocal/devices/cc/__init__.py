@@ -187,20 +187,16 @@ class MideaCCDevice(MideaDevice):
     def make_message_set(self) -> MessageSet | CCTLVMessageSet:
         """Midea CC device make message set.
 
-        For VNT8 devices (which speak TLV on the wire) we return an
-        experimental CCTLVMessageSet seeded from a cached notify body.
-        We prefer the power-on template since most SETs are "do
-        something while running" — if the AC is currently off we still
-        want phase bytes (running fan, activity flags) to look like an
-        ON state so the AC actually transitions. Legacy CC devices keep
-        using the fixed legacy MessageSet.
+        VNT8 devices (detected by having seen a TLV notify) use real
+        TLV-record SETs: only the controls the caller explicitly sets
+        end up on the wire. Legacy CC devices use the fixed-offset
+        MessageSet, which requires full current state.
         """
-        message: MessageSet | CCTLVMessageSet
-        template = self._tlv_template_on or self._tlv_template_off
-        if template is not None:
-            message = CCTLVMessageSet(self._message_protocol_version, template)
-        else:
-            message = MessageSet(self._message_protocol_version)
+        if self._tlv_template_on is not None or self._tlv_template_off is not None:
+            # TLV SET — leave fields unset; caller (set_attribute /
+            # set_target_temperature) writes only what changes.
+            return CCTLVMessageSet(self._message_protocol_version)
+        message = MessageSet(self._message_protocol_version)
         message.power = self._attributes[DeviceAttributes.power]
         message.mode = self._attributes[DeviceAttributes.mode]
         message.target_temperature = self._attributes[

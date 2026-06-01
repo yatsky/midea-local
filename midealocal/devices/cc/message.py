@@ -160,108 +160,141 @@ class MessageSet(MessageCCBase):
 
 
 class CCTLVMessageSet(MessageCCBase):
-    """EXPERIMENTAL VNT8 CC SET frame — KNOWN NOT TO WORK as of 2026-06-01.
+    """VNT8 CC SET — real TLV-record encoding.
 
-    Status: the "mirror response body as SET" hypothesis was tested
-    across four iterations (body_type 0xC3 / 0x01, varying mutation
-    sets). The closest result was an AC ACK beep with no state change
-    in one minimal variant; everything else was silently dropped. The
-    VNT8 (171PNL01) SET protocol is genuinely different from its
-    response protocol — likely real TLV records keyed by CCControlId
-    plus some framing/integrity bits we can't reproduce without seeing
-    a real SET frame.
+    Based on the reverse-engineered protocol in mill1000/midea-msmart
+    (msmart/device/CC/command.py::ControlCommand). Each control is sent
+    as a TLV record:
 
-    Kept in place as scaffolding for a future H2 (true TLV-record)
-    encoder. Receive-side parsing (CCTLVMessageBody) works fine — only
-    sending is broken. See docs/vnt8-set-experiments.md in the
-    homeassistant-lzc repo for the full experiment log and next steps.
+        [ID_hi ID_lo LEN VALUE 0xFF]
 
-    Byte offsets (into the full response body, body_type at position 0):
-      8  power           0x00 / 0x01
-      11 target_temp     (temp + 40) * 2
-      31 mode            raw 1..6
-      34 fan_speed       1..7 levels, 8 = auto, 0 = off
-      36 phase_a         0x05 when running, 0x00 when off
-      41 phase_b         0x05 when running, 0x00 when off
-      43 phase_c         0x02 when running, 0x03 when off
+    After all records: 1-byte message_id (incrementing) + 1-byte CRC-8/854
+    over (records + message_id). The body has NO body_type prefix byte
+    (unlike midealocal's other set messages); we set _body_type=None
+    after super().__init__ to suppress the framework prefix.
 
-    Phase bytes are AC-reported activity flags that we mirror into our
-    SETs so the frame "looks like" the AC's own running/off snapshot.
-    Without them the AC sees power=on with phase=off, calls it
-    incoherent, and silently drops the SET.
+    Mode mapping (midealocal attr -> raw byte the AC expects):
+      1 (auto) -> 5
+      2 (cool) -> 2
+      3 (heat) -> 3
+      4 (dry)  -> 6
+    Fan speed is sequential 1..7 + 8 for auto (NOT bitmask like the
+    legacy _fan_speeds_7level dict).
     """
 
-    _POS_POWER = 8
-    _POS_TARGET = 11
-    _POS_MODE = 31
-    _POS_FAN = 34
-    _POS_PHASE_A = 36
-    _POS_PHASE_B = 41
-    _POS_PHASE_C = 43
+    # Control IDs (from CCControlId, duplicated as plain ints to avoid
+    # an enum import dependency cycle).
+    _ID_POWER = 0x0000
+    _ID_TARGET_TEMP = 0x0003
+    _ID_MODE = 0x0012
+    _ID_FAN_SPEED = 0x0015
+    _ID_ECO = 0x0028
+    _ID_SLEEP = 0x002C
 
-    # Hardcoded ON-state snapshot (mode=3 heat, fan=7, target=28) used
-    # as a fallback when we haven't yet captured a power-on notify.
-    # Sourced from a real 171PNL01 capture.
-    _DEFAULT_TEMPLATE = bytes.fromhex(
-        "01fe00000043005001728c88008100728c728c888800010141ff"
-        "010203000603010007000500000001050102010000000000000000000001"
-        "000100010000000000000000000000000001000200000100000001000102"
-        "ff02ff",
+    # CRC-8/854 lookup table (lifted from mill1000/midea-msmart).
+    _CRC8_854_TABLE = (
+        0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
+        0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
+        0x9D, 0xC3, 0x21, 0x7F, 0xFC, 0xA2, 0x40, 0x1E,
+        0x5F, 0x01, 0xE3, 0xBD, 0x3E, 0x60, 0x82, 0xDC,
+        0x23, 0x7D, 0x9F, 0xC1, 0x42, 0x1C, 0xFE, 0xA0,
+        0xE1, 0xBF, 0x5D, 0x03, 0x80, 0xDE, 0x3C, 0x62,
+        0xBE, 0xE0, 0x02, 0x5C, 0xDF, 0x81, 0x63, 0x3D,
+        0x7C, 0x22, 0xC0, 0x9E, 0x1D, 0x43, 0xA1, 0xFF,
+        0x46, 0x18, 0xFA, 0xA4, 0x27, 0x79, 0x9B, 0xC5,
+        0x84, 0xDA, 0x38, 0x66, 0xE5, 0xBB, 0x59, 0x07,
+        0xDB, 0x85, 0x67, 0x39, 0xBA, 0xE4, 0x06, 0x58,
+        0x19, 0x47, 0xA5, 0xFB, 0x78, 0x26, 0xC4, 0x9A,
+        0x65, 0x3B, 0xD9, 0x87, 0x04, 0x5A, 0xB8, 0xE6,
+        0xA7, 0xF9, 0x1B, 0x45, 0xC6, 0x98, 0x7A, 0x24,
+        0xF8, 0xA6, 0x44, 0x1A, 0x99, 0xC7, 0x25, 0x7B,
+        0x3A, 0x64, 0x86, 0xD8, 0x5B, 0x05, 0xE7, 0xB9,
+        0x8C, 0xD2, 0x30, 0x6E, 0xED, 0xB3, 0x51, 0x0F,
+        0x4E, 0x10, 0xF2, 0xAC, 0x2F, 0x71, 0x93, 0xCD,
+        0x11, 0x4F, 0xAD, 0xF3, 0x70, 0x2E, 0xCC, 0x92,
+        0xD3, 0x8D, 0x6F, 0x31, 0xB2, 0xEC, 0x0E, 0x50,
+        0xAF, 0xF1, 0x13, 0x4D, 0xCE, 0x90, 0x72, 0x2C,
+        0x6D, 0x33, 0xD1, 0x8F, 0x0C, 0x52, 0xB0, 0xEE,
+        0x32, 0x6C, 0x8E, 0xD0, 0x53, 0x0D, 0xEF, 0xB1,
+        0xF0, 0xAE, 0x4C, 0x12, 0x91, 0xCF, 0x2D, 0x73,
+        0xCA, 0x94, 0x76, 0x28, 0xAB, 0xF5, 0x17, 0x49,
+        0x08, 0x56, 0xB4, 0xEA, 0x69, 0x37, 0xD5, 0x8B,
+        0x57, 0x09, 0xEB, 0xB5, 0x36, 0x68, 0x8A, 0xD4,
+        0x95, 0xCB, 0x29, 0x77, 0xF4, 0xAA, 0x48, 0x16,
+        0xE9, 0xB7, 0x55, 0x0B, 0x88, 0xD6, 0x34, 0x6A,
+        0x2B, 0x75, 0x97, 0xC9, 0x4A, 0x14, 0xF6, 0xA8,
+        0x74, 0x2A, 0xC8, 0x96, 0x15, 0x4B, 0xA9, 0xF7,
+        0xB6, 0xE8, 0x0A, 0x54, 0xD7, 0x89, 0x6B, 0x35,
     )
 
-    def __init__(self, protocol_version: int, template: bytes | None = None) -> None:
-        """Initialize a TLV SET seeded from the last received notify body."""
-        # EXPERIMENTAL: VNT8 responses use body_type=0x01 for both query
-        # and notify. Trying the same body_type for SET (instead of the
-        # legacy 0xC3) since 0xC3 SETs are silently dropped except for a
-        # very narrow case (off→on with no other mutations) that triggered
-        # only an ACK beep without state change.
+    # midealocal attr mode -> raw byte the AC expects.
+    _MODE_ATTR_TO_RAW = {1: 5, 2: 2, 3: 3, 4: 6}
+
+    _message_id_counter = 0
+
+    def __init__(self, protocol_version: int) -> None:
+        """Initialize a TLV SET; controls are added by the caller."""
         super().__init__(
             protocol_version=protocol_version,
             message_type=MessageType.set,
-            body_type=ListTypes.X01,
+            body_type=ListTypes.X00,
         )
-        self._template = bytearray(template if template else self._DEFAULT_TEMPLATE)
+        # VNT8 TLV body has no body_type prefix — bypass framework default.
+        self._body_type = None
         self.power: bool | None = None
         self.target_temperature: float | None = None
         self.mode: int | None = None
         self.fan_speed: int | None = None
-        # Accepted via setattr() from set_attribute(); ignored in _body.
-        self.eco_mode = False
-        self.sleep_mode = False
+        self.eco_mode: bool | None = None
+        self.sleep_mode: bool | None = None
+        # Accepted via setattr() from set_attribute() for compat; unused.
         self.night_light = False
         self.aux_heat_status = 0
         self.swing = False
         self.ventilation = False
 
+    @classmethod
+    def _next_message_id(cls) -> int:
+        cls._message_id_counter = (cls._message_id_counter + 1) & 0xFF
+        return cls._message_id_counter
+
+    @classmethod
+    def _crc8(cls, data: bytes) -> int:
+        crc = 0
+        for b in data:
+            crc = cls._CRC8_854_TABLE[(crc ^ b) & 0xFF]
+        return crc
+
     @property
     def _body(self) -> bytearray:
-        body = bytearray(self._template)
-        # Strip the response's body_type (0x01); framework prepends new one.
-        if body and body[0] in (0x01, 0xC3):
-            body = body[1:]
+        body = bytearray()
 
-        def _put(pos: int, value: int) -> None:
-            idx = pos - 1
-            if 0 <= idx < len(body):
-                body[idx] = value & 0xFF
+        def _record(ctrl_id: int, value: bytes) -> None:
+            body.extend(struct.pack(">H", ctrl_id))
+            body.append(len(value))
+            body.extend(value)
+            body.append(0xFF)
 
-        # Minimal mutation set (no phase-byte guesses): this is the v1.0.5
-        # test of whether body_type=0x01 with byte-8-only mutation gets
-        # a meaningful AC response. If still silent, H1 is dead.
-        if self.power is True:
-            _put(self._POS_POWER, 0x01)
-        elif self.power is False:
-            _put(self._POS_POWER, 0x00)
+        if self.power is not None:
+            _record(self._ID_POWER, bytes([0x01 if self.power else 0x00]))
         if self.target_temperature is not None:
-            _put(
-                self._POS_TARGET,
-                int(round((self.target_temperature + 40) * 2)),
+            _record(
+                self._ID_TARGET_TEMP,
+                bytes([int((2 * self.target_temperature) + 80) & 0xFF]),
             )
         if self.mode is not None:
-            _put(self._POS_MODE, int(self.mode))
+            raw_mode = self._MODE_ATTR_TO_RAW.get(int(self.mode), int(self.mode))
+            _record(self._ID_MODE, bytes([raw_mode & 0xFF]))
         if self.fan_speed is not None:
-            _put(self._POS_FAN, int(self.fan_speed))
+            _record(self._ID_FAN_SPEED, bytes([int(self.fan_speed) & 0xFF]))
+        if self.eco_mode is not None:
+            _record(self._ID_ECO, bytes([0x01 if self.eco_mode else 0x00]))
+        if self.sleep_mode is not None:
+            _record(self._ID_SLEEP, bytes([0x01 if self.sleep_mode else 0x00]))
+
+        # Append message_id then CRC8 over (records + msg_id)
+        body.append(self._next_message_id())
+        body.append(self._crc8(bytes(body)))
         return body
 
 
