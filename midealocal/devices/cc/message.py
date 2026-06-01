@@ -204,10 +204,15 @@ class CCTLVMessageSet(MessageCCBase):
 
     def __init__(self, protocol_version: int, template: bytes | None = None) -> None:
         """Initialize a TLV SET seeded from the last received notify body."""
+        # EXPERIMENTAL: VNT8 responses use body_type=0x01 for both query
+        # and notify. Trying the same body_type for SET (instead of the
+        # legacy 0xC3) since 0xC3 SETs are silently dropped except for a
+        # very narrow case (off→on with no other mutations) that triggered
+        # only an ACK beep without state change.
         super().__init__(
             protocol_version=protocol_version,
             message_type=MessageType.set,
-            body_type=ListTypes.C3,
+            body_type=ListTypes.X01,
         )
         self._template = bytearray(template if template else self._DEFAULT_TEMPLATE)
         self.power: bool | None = None
@@ -225,7 +230,7 @@ class CCTLVMessageSet(MessageCCBase):
     @property
     def _body(self) -> bytearray:
         body = bytearray(self._template)
-        # Strip the response's body_type (0x01); framework prepends 0xC3.
+        # Strip the response's body_type (0x01); framework prepends new one.
         if body and body[0] in (0x01, 0xC3):
             body = body[1:]
 
@@ -234,23 +239,13 @@ class CCTLVMessageSet(MessageCCBase):
             if 0 <= idx < len(body):
                 body[idx] = value & 0xFF
 
+        # Minimal mutation set (no phase-byte guesses): this is the v1.0.5
+        # test of whether body_type=0x01 with byte-8-only mutation gets
+        # a meaningful AC response. If still silent, H1 is dead.
         if self.power is True:
             _put(self._POS_POWER, 0x01)
-            _put(self._POS_PHASE_A, 0x05)
-            _put(self._POS_PHASE_B, 0x05)
-            _put(self._POS_PHASE_C, 0x02)
-            # Fan must be a valid running level when powering on.
-            # 0x08 (auto) caused the AC to reject the SET; 0x07 (Level 7)
-            # is the value we've actually seen the AC report in notifies.
-            if self.fan_speed is None and self._POS_FAN - 1 < len(body):
-                if body[self._POS_FAN - 1] == 0:
-                    _put(self._POS_FAN, 0x07)
         elif self.power is False:
             _put(self._POS_POWER, 0x00)
-            _put(self._POS_FAN, 0x00)
-            _put(self._POS_PHASE_A, 0x00)
-            _put(self._POS_PHASE_B, 0x00)
-            _put(self._POS_PHASE_C, 0x03)
         if self.target_temperature is not None:
             _put(
                 self._POS_TARGET,
